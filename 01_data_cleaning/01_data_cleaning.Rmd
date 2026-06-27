@@ -1,0 +1,211 @@
+---
+title: "01 — Data Cleaning: SMILES Retrieval & Compound Matrix Preparation"
+author: "Edgard Uriel López Chablé"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = normalizePath(".."))  # all paths relative to cookbook root
+```
+
+# Overview
+
+This step prepares the compound matrix for ADME filtering. Two entry points:
+
+- **Scenario A (GC-MS matrix):** Compound × sample abundance matrix with replicate columns per condition (format: `R<n>-<CONDITION>`, e.g. `R1-LEA-ET`, `R2-FLO-AQ`). This script retrieves SMILES, collapses replicates, and binarizes the matrix.
+- **Scenario B (Curated list):** Table with compound names, PubChemCID, and SMILES already available. Skip directly to the export chunk.
+
+Both scenarios produce: `compounds_ready.csv` with columns `Name`, `PubChemCID`, `SMILES`, and (Scenario A only) one binary column per condition.
+
+```{r example-flag}
+# ── Set to TRUE to run with the bundled example dataset ───────────────────────
+# Set to FALSE and update the file paths in each load chunk for your own data.
+USE_EXAMPLE_DATA <- TRUE
+EXAMPLE_DIR      <- "example_data"
+```
+
+```{r libraries}
+library(tidyverse)
+library(webchem)
+```
+
+---
+
+# Scenario A — GC-MS Abundance Matrix
+
+## A1. Load data
+
+```{r load-a}
+if (USE_EXAMPLE_DATA) {
+  # Example: 8 compounds × 5 conditions × 3 replicates
+  # Columns: Name, R1-LEA-ET, R2-LEA-ET, ..., R3-STE-ET
+  abundance_matrix    <- read_csv(file.path(EXAMPLE_DIR, "01_abundance_matrix.csv"),
+                                   show_col_types = FALSE)
+  compound_dictionary <- read_csv(file.path(EXAMPLE_DIR, "01_compound_dictionary.csv"),
+                                   show_col_types = FALSE)
+} else {
+  # ── Replace with your actual file paths ───────────────────────────────────
+  # abundance_matrix:    compound × sample matrix from GC-MS/metabolomics
+  #   Required columns: Name (character) + replicate columns (R<n>-<CONDITION>)
+  # compound_dictionary: master table with NAME and CAS columns
+  abundance_matrix    <- read_csv("YOUR_ABUNDANCE_MATRIX.csv")
+  compound_dictionary <- read_csv("YOUR_COMPOUND_DICTIONARY.csv")
+}
+
+cat("Compounds in matrix:", nrow(abundance_matrix), "\n")
+cat("Sample columns:", ncol(abundance_matrix) - 1, "\n")
+```
+
+## A2. Retrieve SMILES from PubChem
+
+We query PubChem **by compound name**, not by CAS, because a compound can have multiple registered CAS entries across databases, causing silent mismatches. PubChem name lookup resolves to a unique CID and canonical SMILES.
+
+```{r smiles-pubchem}
+# Helper: normalize compound names for reliable joining
+normalize_name <- function(x) {
+  x %>% tolower() %>%
+    str_replace_all("[[:punct:]]", "") %>%
+    str_replace_all("\\s+", "")
+}
+
+# Build a lookup dictionary: normalized name → CAS
+dict_normalized <- compound_dictionary %>%
+  select(NAME, CAS) %>%
+  mutate(name_key = normalize_name(NAME)) %>%
+  distinct(name_key, .keep_all = TRUE)
+
+# Attach CAS to the abundance matrix via normalized name match
+df_with_cas <- abundance_matrix %>%
+  mutate(name_key = normalize_name(Name)) %>%
+  left_join(dict_normalized, by = "name_key") %>%
+  select(Name, CAS, everything(), -name_key, -NAME) %>%
+  drop_na(CAS)
+
+cat("Compounds with matched CAS:", nrow(df_with_cas), "\n")
+
+# Query PubChem: CID by compound name
+# NOTE: requires internet. Can take several minutes for large lists.
+cids <- get_cid(df_with_cas$Name, from = "name", match = "first") %>%
+  rename(Name = query) %>%
+  drop_na(cid)
+
+# Retrieve canonical SMILES for each CID
+smiles_df <- pc_prop(cids$cid, properties = "SMILES") %>%
+  rename(cid = CID, SMILES = SMILES)
+
+# Integrate into matrix
+df_with_smiles <- df_with_cas %>%
+  left_join(cids,      by = "Name") %>%
+  left_join(smiles_df, by = "cid") %>%
+  drop_na(SMILES) %>%
+  rename(PubChemCID = cid) %>%
+  select(Name, CAS, PubChemCID, SMILES, everything()) %>%
+  distinct()
+
+cat("Compounds with SMILES:", nrow(df_with_smiles), "\n")
+```
+
+## A3. Collapse replicates and binarize by condition
+
+Converts abundance-per-replicate → presence/absence-per-condition.
+
+```{r binarize}
+# NOTE: Adjust the regex if your replicate prefix differs from R<n>-
+# Expected pattern: R1-CONDITION, R2-CONDITION, R3-CONDITION
+# Examples: R1-LEA-ET, R2-FLO-AQ, R3-STE-ET
+
+df_binary <- df_with_smiles %>%
+  pivot_longer(
+    cols      = matches("^R\\d+-"),    # replicate columns
+    names_to  = "sample",
+    values_to = "abundance"
+  ) %>%
+  mutate(condition = str_remove(sample, "^R\\d+-")) %>%  # e.g. R1-LEA-ET → LEA-ET
+  group_by(Name, CAS, PubChemCID, SMILES, condition) %>%
+  summarise(total = sum(abundance, na.rm = TRUE), .groups = "drop") %>%
+  mutate(presence = if_else(total > 0, 1L, 0L)) %>%
+  select(-total) %>%
+  pivot_wider(names_from = condition, values_from = presence, values_fill = 0L)
+
+cat("Binary matrix — compounds:", nrow(df_binary), "| conditions:", ncol(df_binary) - 4, "\n")
+```
+
+## A4. Add manually curated compounds (optional)
+
+Some compounds of interest may be absent from GC-MS data (e.g., heat-labile compounds). Add them here with their known condition presence.
+
+```{r manual-compounds}
+# Adjust Name, CAS, PubChemCID, SMILES, and binary values per condition
+manual_compounds <- tibble(
+  Name       = c("Rutin"),
+  CAS        = c("153-18-4"),
+  PubChemCID = c(5280805L),
+  SMILES     = c("OC[C@H]1O[C@@H](Oc2cc3c(=O)cc(-c4ccc(O)c(O)c4)oc3cc2O)[C@H](O)[C@@H](O)[C@@H]1O"),
+  `LEA-ET`   = c(1L),
+  `LEA-AQ`   = c(1L),
+  `FLO-ET`   = c(0L),
+  `FLO-AQ`   = c(0L),
+  `STE-ET`   = c(0L)
+)
+
+df_binary_final <- bind_rows(
+    df_binary        %>% mutate(PubChemCID = as.integer(PubChemCID)),
+    manual_compounds %>% mutate(PubChemCID = as.integer(PubChemCID))
+  ) %>%
+  mutate(across(where(is.numeric), ~ replace_na(., 0L)))
+
+cat("Final matrix with manual compounds:", nrow(df_binary_final), "compounds\n")
+```
+
+---
+
+# Scenario B — Curated Compound List
+
+Use this path when you already have compound names, PubChemCIDs, and SMILES (e.g., from a literature search or phytochemical database).
+
+```{r scenario-b}
+if (USE_EXAMPLE_DATA) {
+  # Example: 8 phenolic compounds from Sphaeralcea angustifolia
+  compounds_ready <- read_csv(file.path(EXAMPLE_DIR, "01_compounds_list.csv"),
+                               show_col_types = FALSE)
+} else {
+  # ── Replace with your actual file path ────────────────────────────────────
+  # Required columns: Name, CAS, PubChemCID, SMILES
+  # Optional: condition binary columns (if coming from Scenario A)
+  compounds_ready <- read_csv("YOUR_COMPOUNDS_LIST.csv")
+}
+
+cat("Compounds loaded (Scenario B):", nrow(compounds_ready), "\n")
+print(compounds_ready)
+```
+
+---
+
+# Export
+
+```{r export}
+# For Scenario A: export df_binary_final
+# For Scenario B: the object is already called compounds_ready
+
+# Uncomment the line matching your scenario:
+# write_csv(df_binary_final, "01_data_cleaning/compounds_ready.csv")   # Scenario A
+write_csv(compounds_ready, "01_data_cleaning/compounds_ready.csv")     # Scenario B
+
+cat("Output: 01_data_cleaning/compounds_ready.csv\n")
+```
+
+---
+
+# Output
+
+| File | Description |
+|------|-------------|
+| `01_data_cleaning/compounds_ready.csv` | Compound table: `Name`, `PubChemCID`, `SMILES` ± binary condition columns |
+
+→ Feeds into **Step 02 (ADME Filtering)**

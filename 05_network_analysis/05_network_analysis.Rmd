@@ -1,0 +1,581 @@
+---
+title: "05 — Network Analysis: Disease Intersection, Networks & Functional Enrichment"
+author: "Edgard Uriel López Chablé"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+# Overview
+
+1. Load disease targets from **GeneCards**
+2. Venn diagram of compound targets ∩ disease targets
+3. Compound–target network **(Network B)**
+4. STRING protein–protein interaction network **(Network C)**
+5. Hub gene subgraph **(Network D)**
+6. Functional enrichment: GO, KEGG, Reactome + dotplots + pathway maps + tripartite cnetplot **(Network E)**
+
+```{r example-flag}
+USE_EXAMPLE_DATA <- TRUE
+EXAMPLE_DIR      <- "example_data"
+```
+
+```{r libraries}
+library(tidyverse)
+library(httr)
+library(jsonlite)
+library(igraph)
+library(ggraph)
+library(ggVennDiagram)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ReactomePA)
+library(pathview)
+library(enrichplot)
+library(magick)
+```
+
+---
+
+# Step 1 — Load target predictions from Step 04
+
+```{r load-targets}
+df_targets <- read_csv("04_target_prediction/df_targets.csv",
+                        show_col_types = FALSE)
+
+cat("Compound–target interactions:", nrow(df_targets), "\n")
+cat("Unique compounds:", n_distinct(df_targets$Name), "\n")
+cat("Unique targets:", n_distinct(df_targets$UniProtID), "\n")
+```
+
+---
+
+# Step 2 — Disease Targets from GeneCards
+
+## Manual step — Download GeneCards lists
+
+> **Action required (skip when using example data):**
+>
+> 1. Go to https://www.genecards.org/
+> 2. Search for each disease/phenotype term (e.g., "Hypertension", "Inflammation")
+> 3. Download the results table as CSV
+> 4. Save as `GeneCards<Term>.csv` (e.g., `GeneCardsHypertension.csv`) in `05_network_analysis/genecards/`
+
+## ⚠️ Header check
+
+```{r genecards-headers}
+if (USE_EXAMPLE_DATA) {
+  gc_dir <- file.path(EXAMPLE_DIR, "05_genecards")
+} else {
+  gc_dir <- "05_network_analysis/genecards"
+}
+
+gc_files <- list.files(gc_dir, pattern = "\\.csv$", full.names = TRUE)
+cat("GeneCards files found:", length(gc_files), "\n")
+
+if (length(gc_files) > 0) {
+  sample_gc <- read_csv(gc_files[1], show_col_types = FALSE, n_max = 2)
+  cat("\nHeaders in", basename(gc_files[1]), ":\n")
+  print(colnames(sample_gc))
+}
+```
+
+> Expected GeneCards headers:
+>
+> | Column | Notes |
+> |--------|-------|
+> | `Gene Symbol` | HGNC symbol |
+> | `Uniprot ID` | UniProt accession (note lowercase 'n') |
+> | `Relevance score` | GeneCards score — filter > 5 to remove low-confidence entries |
+
+```{r genecards-load}
+df_disease <- gc_files %>%
+  map_dfr(~read_csv(.x, show_col_types = FALSE)) %>%
+  filter(`Relevance score` > 5) %>%
+  distinct(`Gene Symbol`, .keep_all = TRUE)
+
+cat("Unique disease targets after filter:", nrow(df_disease), "\n")
+dir.create("05_network_analysis/output", recursive = TRUE, showWarnings = FALSE)
+write_csv(df_disease, "05_network_analysis/output/df_disease_targets.csv")
+```
+
+---
+
+# Step 3 — Venn Diagram
+
+```{r venn}
+ids_compounds <- df_targets %>% pull(UniProtID) %>% unique() %>% na.omit()
+ids_disease   <- df_disease %>% pull(`Uniprot ID`) %>% unique() %>% na.omit()
+
+venn_list <- list(
+  "Compound Targets" = ids_compounds,
+  "Disease Targets"  = ids_disease
+)
+
+plot_venn <- ggVennDiagram(
+  venn_list,
+  category.names  = c("Compound\nTargets", "Disease\nTargets"),
+  set_color       = "black",
+  set_size        = 4,
+  label           = "both",
+  label_size      = 4,
+  label_alpha     = 0
+) +
+  scale_fill_gradient(low = "#F4FAFE", high = "#4981BF") +
+  scale_x_continuous(expand = expansion(mult = c(0.4, 0.4))) +
+  theme_void() +
+  labs(title    = "Compound–Disease Target Intersection",
+       subtitle = "Compound targets vs. GeneCards disease targets") +
+  theme(plot.title    = element_text(size = 18, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 13, hjust = 0.5),
+        legend.position = "none")
+
+print(plot_venn)
+
+ggsave("05_network_analysis/output/Venn_Compounds_vs_Disease.tiff",
+       plot = plot_venn, width = 10, height = 8, units = "in",
+       dpi = 600, compression = "lzw", bg = "white")
+ggsave("05_network_analysis/output/Venn_Compounds_vs_Disease.pdf",
+       plot = plot_venn, width = 10, height = 8, units = "in",
+       bg = "white", device = cairo_pdf)
+```
+
+---
+
+# Step 4 — Build the Final Network Table
+
+```{r network-table}
+# Drop Gene Symbol from disease table to avoid column conflict after join
+# (we use the Gene Symbol already present in df_targets from the prediction server)
+network_final <- df_targets %>%
+  inner_join(
+    df_disease %>% dplyr::select(-`Gene Symbol`),
+    by = c("UniProtID" = "Uniprot ID")
+  )
+
+cat("Interactions in intersection:", nrow(network_final), "\n")
+cat("Unique targets:", n_distinct(network_final$UniProtID), "\n")
+
+write_csv(network_final, "05_network_analysis/output/network_final.csv")
+```
+
+---
+
+# Step 5 — Network B: Compound–Target Network
+
+```{r network-b}
+# ── Aesthetic parameters — adjust as needed ───────────────────────────────────
+color_compounds <- "#5c5cff"   # blue
+color_genes     <- "#ffcc00"   # yellow/gold
+
+# ── Build graph ───────────────────────────────────────────────────────────────
+edges_b <- network_final %>%
+  dplyr::select(Source = Name, Target = `Gene Symbol`) %>%
+  distinct()
+
+graph_b <- graph_from_data_frame(d = edges_b, directed = FALSE)
+V(graph_b)$degree <- degree(graph_b)
+compound_names    <- unique(network_final$Name)
+V(graph_b)$type   <- if_else(V(graph_b)$name %in% compound_names, "Compound", "Gene")
+
+# ── Plot ──────────────────────────────────────────────────────────────────────
+set.seed(42)
+
+plot_b <- ggraph(graph_b, layout = "kk") +
+  geom_edge_link(color = "grey85", alpha = 0.4, width = 0.3) +
+  geom_node_point(aes(shape = type, color = type, size = degree)) +
+  scale_shape_manual(values = c("Compound" = 18, "Gene" = 19)) +
+  scale_color_manual(values = c("Compound" = color_compounds, "Gene" = color_genes)) +
+  scale_size_continuous(range = c(2, 9)) +
+  geom_node_text(
+    aes(filter = (type == "Gene" & degree > 2), label = name),
+    repel = TRUE, size = 3, color = "black", fontface = "bold",
+    max.overlaps = 50, force = 3, box.padding = 0.8, point.padding = 0.4,
+    bg.colour = "white", bg.r = 0.15
+  ) +
+  geom_node_text(
+    aes(filter = (type == "Compound"), label = name),
+    repel = TRUE, size = 3.5, color = "darkblue", fontface = "bold",
+    max.overlaps = 50, force = 5, box.padding = 1.2, point.padding = 0.5,
+    bg.colour = "white", bg.r = 0.15
+  ) +
+  theme_graph() +
+  labs(title = "Compound–Target Network",
+       shape = "Node Type", color = "Node Type", size = "Degree") +
+  theme(legend.position = "right")
+
+print(plot_b)
+
+ggsave("05_network_analysis/output/Network_B_Compound_Target.tiff",
+       plot = plot_b, width = 12, height = 10, units = "in",
+       dpi = 600, compression = "lzw", bg = "white")
+ggsave("05_network_analysis/output/Network_B_Compound_Target.pdf",
+       plot = plot_b, width = 12, height = 10, units = "in",
+       bg = "white", device = cairo_pdf)
+```
+
+---
+
+# Step 6 — Network C: PPI from STRING
+
+```{r network-c}
+# ── STRING REST API (avoids downloading the full ~80 MB proteome links file) ──
+# Only fetches interactions for your specific gene list — much faster and reliable.
+library(httr)
+library(jsonlite)
+
+gene_symbols <- network_final %>%
+  pull(`Gene Symbol`) %>%
+  unique() %>%
+  na.omit()
+
+# required_score: 400 = medium, 700 = high, 900 = very high
+# POST is required for multiple identifiers — GET double-encodes the \r separator
+string_response <- POST(
+  "https://string-db.org/api/json/network",
+  body = list(
+    identifiers     = paste(gene_symbols, collapse = "\r"),
+    species         = "9606",
+    required_score  = "700",
+    caller_identity = "network_pharmacology_cookbook"
+  ),
+  encode = "form"
+)
+
+if (http_error(string_response)) {
+  stop("STRING API request failed: ", status_code(string_response))
+}
+
+raw_text <- content(string_response, "text", encoding = "UTF-8")
+
+# Empty response = no interactions found above the score threshold
+if (nchar(trimws(raw_text)) == 0 || raw_text == "[]") {
+  warning("STRING returned no interactions. Try lowering required_score to 400.")
+  ppi_network <- tibble(Source = character(), Target = character(),
+                        combined_score = numeric())
+} else {
+  # STRING REST API returns score in 0–1 scale; required_score parameter
+  # already pre-filters at the requested threshold (700/1000 = 0.7).
+  # No additional filter needed here.
+  ppi_network <- fromJSON(raw_text) %>%
+    as_tibble() %>%
+    dplyr::select(Source = preferredName_A, Target = preferredName_B,
+                  combined_score = score) %>%
+    distinct()
+}
+
+cat("PPI interactions extracted:", nrow(ppi_network), "\n")
+write_csv(ppi_network, "05_network_analysis/output/PPI_EdgeList.csv")
+
+# ── Plot ──────────────────────────────────────────────────────────────────────
+set.seed(123)
+graph_c           <- graph_from_data_frame(d = ppi_network, directed = FALSE)
+V(graph_c)$degree <- degree(graph_c)
+
+plot_c <- ggraph(graph_c, layout = "kk") +
+  geom_edge_link(color = "grey88", alpha = 0.5, width = 0.3) +
+  geom_node_point(aes(size = degree, color = degree)) +
+  scale_color_gradient(low = "#ff9933", high = "#990000") +
+  scale_size_continuous(range = c(3, 9)) +
+  geom_node_text(
+    aes(label = if_else(degree > 1, name, "")),
+    repel = TRUE, size = 3, color = "black", fontface = "bold",
+    max.overlaps = 30, bg.colour = "white", bg.r = 0.15
+  ) +
+  theme_graph() +
+  labs(title = "Protein–Protein Interaction Network (PPI)",
+       color = "Degree", size = "Degree") +
+  theme(legend.position = "right")
+
+print(plot_c)
+
+ggsave("05_network_analysis/output/Network_C_PPI.tiff",
+       plot = plot_c, width = 11, height = 9, units = "in",
+       dpi = 600, compression = "lzw", bg = "white")
+ggsave("05_network_analysis/output/Network_C_PPI.pdf",
+       plot = plot_c, width = 11, height = 9, units = "in",
+       bg = "white", device = cairo_pdf)
+```
+
+---
+
+# Step 7 — Network Topology Metrics
+
+> **Why report topology?** Reviewers of *Frontiers in Pharmacology*, *Phytomedicine*,
+> and similar journals routinely ask for a network topology table. It confirms that
+> your PPI network has "small-world" properties (high clustering, short paths) typical
+> of biological networks, and distinguishes it from a random graph.
+
+```{r topology}
+topology_metrics <- tibble(
+  Metric  = c("Nodes", "Edges", "Average degree",
+               "Network density", "Clustering coefficient",
+               "Average path length", "Diameter"),
+  Value = c(
+    vcount(graph_c),
+    ecount(graph_c),
+    round(mean(degree(graph_c)), 3),
+    round(edge_density(graph_c), 4),
+    round(transitivity(graph_c, type = "average"), 3),
+    round(mean_distance(graph_c, directed = FALSE), 3),
+    diameter(graph_c, directed = FALSE)
+  )
+)
+
+write_csv(topology_metrics, "05_network_analysis/output/Network_Topology.csv")
+print(topology_metrics)
+```
+
+---
+
+# Step 8 — Network D: Hub Gene Subgraph (Multi-Centrality)
+
+> **Why multiple centrality measures?**
+> Degree centrality counts how many proteins a node is connected to — a high-degree
+> protein interacts with many others. But **betweenness centrality** identifies proteins
+> that act as *bridges* between clusters (knock them out and the network falls apart).
+> **Closeness centrality** measures how quickly a signal can propagate from that protein
+> to the rest of the network. Using all three gives a more robust hub definition than
+> degree alone, which is what CytoHubba (the Cytoscape plugin) does internally.
+>
+> A gene that ranks high on all three measures is the strongest candidate for docking:
+> it is both highly connected AND structurally critical to the network.
+
+```{r network-d}
+n_hubs <- min(10, vcount(graph_c))
+
+# ── Compute three centrality measures ────────────────────────────────────────
+centrality_table <- tibble(
+  Gene        = V(graph_c)$name,
+  Degree      = degree(graph_c),
+  Betweenness = round(betweenness(graph_c, normalized = TRUE), 4),
+  Closeness   = round(closeness(graph_c, normalized = TRUE), 4)
+) %>%
+  # Composite score: average rank across the three measures
+  mutate(
+    Rank_Degree      = rank(-Degree),
+    Rank_Betweenness = rank(-Betweenness),
+    Rank_Closeness   = rank(-Closeness),
+    Composite_Score  = round((Rank_Degree + Rank_Betweenness + Rank_Closeness) / 3, 2)
+  ) %>%
+  arrange(Composite_Score) %>%
+  dplyr::select(Gene, Degree, Betweenness, Closeness, Composite_Score)
+
+write_csv(centrality_table, "05_network_analysis/output/HubGene_Table.csv")
+cat("=== Hub Gene Centrality Table ===\n")
+print(centrality_table)
+
+# Top hubs by composite score for the subgraph
+top_hub_names <- centrality_table %>% slice_head(n = n_hubs) %>% pull(Gene)
+hub_vids      <- which(V(graph_c)$name %in% top_hub_names)
+graph_hubs    <- induced_subgraph(graph_c, vids = hub_vids)
+
+V(graph_hubs)$degree      <- degree(graph_hubs)
+V(graph_hubs)$betweenness <- betweenness(graph_hubs, normalized = TRUE)
+
+# ── Plot: node size = degree, color = betweenness ────────────────────────────
+plot_d <- ggraph(graph_hubs, layout = "circle") +
+  geom_edge_link(color = "darkslategray4", alpha = 0.6, width = 0.8) +
+  geom_node_point(aes(size = degree, color = betweenness)) +
+  scale_color_gradient(low = "#e63946", high = "#7a0010",
+                       name = "Betweenness\n(normalized)") +
+  scale_size_continuous(range = c(8, 16), name = "Degree") +
+  geom_node_text(aes(label = name), repel = TRUE, size = 4.5,
+                 color = "black", fontface = "bold",
+                 bg.colour = "white", bg.r = 0.2) +
+  theme_graph() +
+  labs(title    = paste("Top", n_hubs, "Hub Genes — PPI Network"),
+       subtitle = "Node size = Degree  |  Color = Betweenness centrality") +
+  theme(legend.position = "right")
+
+print(plot_d)
+
+ggsave("05_network_analysis/output/Network_D_HubGenes.tiff",
+       plot = plot_d, width = 9, height = 8, units = "in",
+       dpi = 600, compression = "lzw", bg = "white")
+ggsave("05_network_analysis/output/Network_D_HubGenes.pdf",
+       plot = plot_d, width = 9, height = 8, units = "in",
+       bg = "white", device = cairo_pdf)
+```
+
+---
+
+# Step 8 — Functional Enrichment
+
+## 8a. Prepare data and translate IDs
+
+```{r enrich-prep}
+# Aggregate by target
+target_summary <- network_final %>%
+  filter(Probability > 0) %>%
+  group_by(UniProtID) %>%
+  summarise(
+    n_compounds = n(),
+    max_prob    = max(Probability),
+    compounds   = paste(unique(Name), collapse = ", "),
+    gene_symbol = dplyr::first(`Gene Symbol`)
+  ) %>%
+  ungroup()
+
+# UniProt → ENTREZID (required by KEGG and GO)
+id_mapping <- bitr(target_summary$UniProtID,
+                   fromType = "UNIPROT",
+                   toType   = c("ENTREZID", "SYMBOL"),
+                   OrgDb    = org.Hs.eg.db)
+
+enrichment_data <- target_summary %>%
+  inner_join(id_mapping, by = c("UniProtID" = "UNIPROT")) %>%
+  mutate(label_tripartite = paste0(SYMBOL, " (", compounds, ")"))
+
+cat("Genes ready for enrichment:", nrow(enrichment_data), "\n")
+```
+
+## 8b. Run GO, KEGG, and Reactome
+
+```{r enrichment-run}
+ego    <- enrichGO(gene = enrichment_data$ENTREZID, OrgDb = org.Hs.eg.db,
+                   ont = "BP", readable = TRUE)
+ekegg  <- enrichKEGG(gene = enrichment_data$ENTREZID, organism = "hsa")
+ereact <- enrichPathway(gene = enrichment_data$ENTREZID, organism = "human",
+                        readable = TRUE)
+
+write_csv(as.data.frame(ego),    "05_network_analysis/output/Results_GO.csv")
+write_csv(as.data.frame(ekegg),  "05_network_analysis/output/Results_KEGG.csv")
+write_csv(as.data.frame(ereact), "05_network_analysis/output/Results_Reactome.csv")
+cat("Enrichment tables saved.\n")
+```
+
+## 8c. Dotplots
+
+```{r dotplots}
+save_plot <- function(p, filename) {
+  ggsave(paste0("05_network_analysis/output/", filename, ".tiff"),
+         plot = p, width = 10, height = 8, units = "in",
+         dpi = 600, compression = "lzw", bg = "white")
+  ggsave(paste0("05_network_analysis/output/", filename, ".pdf"),
+         plot = p, width = 10, height = 8, units = "in",
+         bg = "white", device = cairo_pdf)
+}
+
+plot_go       <- dotplot(ego,    showCategory = 15, title = "GO Biological Process")
+plot_kegg     <- dotplot(ekegg,  showCategory = 15, title = "KEGG Pathways")
+plot_reactome <- dotplot(ereact, showCategory = 15, title = "Reactome Pathways")
+
+save_plot(plot_go,       "Dotplot_GO")
+save_plot(plot_kegg,     "Dotplot_KEGG")
+save_plot(plot_reactome, "Dotplot_Reactome")
+
+print(plot_go)
+print(plot_kegg)
+```
+
+## 8d. KEGG Pathway Maps (pathview)
+
+```{r pathview}
+gene_vector_kegg        <- enrichment_data$max_prob
+names(gene_vector_kegg) <- enrichment_data$ENTREZID
+
+top_kegg_ids   <- as.data.frame(ekegg) %>% head(10) %>% pull(ID)
+pathview_dir   <- "05_network_analysis/output/pathview"
+dir.create(pathview_dir, recursive = TRUE, showWarnings = FALSE)
+
+# pathview() has no output directory parameter — it always writes to the
+# current working directory. We run it, then move every generated file to
+# the output folder so the cookbook root stays clean.
+for (kegg_id in top_kegg_ids) {
+  tryCatch(
+    pathview(gene.data  = gene_vector_kegg,
+             pathway.id = kegg_id,
+             species    = "hsa",
+             limit      = list(gene = c(0, 1)),
+             low = "white", mid = "yellow", high = "red"),
+    error = function(e) message("Error in pathway: ", kegg_id)
+  )
+}
+
+# Move all pathview-generated files (PNG, XML, PDF) to output/pathview/
+generated <- list.files(
+  pattern = paste0("(", paste(top_kegg_ids, collapse = "|"), ").*\\.(png|xml|pdf)$")
+)
+if (length(generated) > 0) {
+  file.rename(generated, file.path(pathview_dir, generated))
+  cat("Moved", length(generated), "pathview files →", pathview_dir, "\n")
+}
+
+# Compile all .pathview.png files into a single PDF
+pathway_pngs <- list.files(pathview_dir, pattern = "\\.pathview\\.png$",
+                            full.names = TRUE)
+if (length(pathway_pngs) > 0) {
+  pdf("05_network_analysis/output/KEGG_Pathway_Maps.pdf", width = 14, height = 10)
+  for (img_path in pathway_pngs) {
+    plot(as.raster(image_read(img_path)))
+    title(main = paste("Pathway:", str_extract(basename(img_path), "hsa\\d+")),
+          cex.main = 2, col.main = "darkblue")
+  }
+  dev.off()
+  cat("KEGG pathway maps compiled →",
+      "05_network_analysis/output/KEGG_Pathway_Maps.pdf\n")
+}
+```
+
+## 8e. Network E: Tripartite Reactome cnetplot
+
+```{r cnetplot}
+gene_vector_cnet        <- enrichment_data$max_prob
+names(gene_vector_cnet) <- enrichment_data$SYMBOL
+
+plot_e <- cnetplot(ereact,
+                   showCategory   = 5,
+                   foldChange     = gene_vector_cnet,
+                   node_label     = "all",
+                   color_category = "black")
+
+# Embed compound names in gene labels: "SYMBOL (compound1, compound2)"
+plot_e$data$label[plot_e$data$label %in% enrichment_data$SYMBOL] <-
+  enrichment_data$label_tripartite[
+    match(plot_e$data$label[plot_e$data$label %in% enrichment_data$SYMBOL],
+          enrichment_data$SYMBOL)
+  ]
+
+plot_e_final <- plot_e +
+  scale_color_gradient(name = "Max Prediction\nProbability",
+                       low = "#ffcc00", high = "#cc0000") +
+  theme_void() +
+  labs(title    = "Tripartite Network — Reactome",
+       subtitle = "Pathway → Target (Compounds predicted to interact)") +
+  theme(legend.position = "right")
+
+print(plot_e_final)
+save_plot(plot_e_final, "Network_E_Tripartite_Reactome")
+cat("All network analysis steps complete.\n")
+```
+
+---
+
+# Output
+
+| File | Description |
+|------|-------------|
+| `df_disease_targets.csv` | GeneCards disease targets (merged) |
+| `Venn_Compounds_vs_Disease.*` | Venn diagram (TIFF + PDF) |
+| `network_final.csv` | Compound–target intersection table |
+| `Network_B_Compound_Target.*` | Bipartite compound–target network |
+| `PPI_EdgeList.csv` | STRING PPI edge list |
+| `Network_Topology.csv` | Nodes, edges, density, clustering coefficient, path length |
+| `Network_C_PPI.*` | Full PPI network |
+| `Network_D_HubGenes.*` | Hub gene subgraph (size=degree, color=betweenness) |
+| `HubGene_Table.csv` | Degree + betweenness + closeness + composite score |
+| `Results_GO/KEGG/Reactome.csv` | Enrichment tables |
+| `Dotplot_*.tiff/.pdf` | Enrichment dotplots |
+| `KEGG_Pathway_Maps.pdf` | Pathview maps compiled |
+| `Network_E_Tripartite_Reactome.*` | Reactome cnetplot |
+
+→ Feeds into **Step 06 (Pre-Docking Analysis)**

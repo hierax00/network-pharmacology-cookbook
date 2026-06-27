@@ -1,0 +1,11 @@
+Target Name,Gene Symbol,UniProt ID,Probability,Model accuracy
+Estrogen receptor,ESR1,P03372,0.92,0.88
+Prostaglandin G/H synthase 2,PTGS2,P35354,0.85,0.83
+Epidermal growth factor receptor,EGFR,P00533,0.78,0.76
+RAC-alpha serine/threonine-protein kinase,AKT1,P31749,0.72,0.79
+Mitogen-activated protein kinase 1,MAPK1,P28482,0.68,0.78
+PI3-kinase subunit alpha,PIK3CA,P42336,0.55,0.75
+Nitric oxide synthase endothelial,NOS3,P29474,0.45,0.81
+Proto-oncogene tyrosine-protein kinase Src,SRC,P12931,0.38,0.74
+Cellular tumor antigen p53,TP53,P04637,0.31,0.72
+Histone deacetylase 1,HDAC1,Q13547,0.25,0.70

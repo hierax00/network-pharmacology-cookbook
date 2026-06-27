@@ -1,0 +1,164 @@
+---
+title: "03 — Toxicity Filtering: ADMETlab Safety Screen"
+author: "Edgard Uriel López Chablé"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+# Overview
+
+Applies an early-stage toxicity screen using **ADMETlab 2.0 / 3.0** before committing to target prediction and docking. Discards compounds with unacceptable predicted safety profiles.
+
+| Property | Meaning | Safe threshold |
+|----------|---------|----------------|
+| **Ames** | Mutagenicity | probability < 0.5 |
+| **DILI** | Drug-induced liver injury | probability < 0.5 |
+| **hERG** | Cardiac channel blockade | probability < 0.5 |
+
+```{r example-flag}
+USE_EXAMPLE_DATA <- TRUE
+EXAMPLE_DIR      <- "example_data"
+```
+
+```{r libraries}
+library(tidyverse)
+```
+
+---
+
+# Step 1 — Load compounds from Step 02
+
+```{r load}
+compounds_filtered <- read_csv("02_adme_filtering/compounds_filtered.csv",
+                                show_col_types = FALSE)
+cat("Input compounds:", nrow(compounds_filtered), "\n")
+```
+
+---
+
+# Step 2 — Generate ADMETlab input
+
+```{r input}
+for_admetlab <- compounds_filtered %>%
+  select(SMILES, Name, PubChemCID)
+
+write_csv(for_admetlab, "03_toxicity_filtering/for_admetlab.csv")
+cat("ADMETlab input written:", nrow(for_admetlab), "compounds\n")
+```
+
+---
+
+# Manual Step — Run ADMETlab
+
+> **Action required (skip when using example data):**
+>
+> 1. Go to https://admetlab3.scbdd.com/ (v3) or https://admetmesh.scbdd.com/ (v2)
+> 2. Paste the SMILES column or upload `for_admetlab.csv`
+> 3. Run the prediction
+> 4. Download the results CSV
+> 5. Save as `03_toxicity_filtering/admetlab_results.csv`
+
+---
+
+# Step 3 — Header check
+
+> ⚠️ Column names differ between ADMETlab versions. Inspect before filtering.
+>
+> | Property | v2 column | v3 column |
+> |----------|-----------|-----------|
+> | Input SMILES | `smiles` | `SMILES` |
+> | Mutagenicity | `Ames` | `Ames_mutagenicity` |
+> | Liver injury | `DILI` | `DILI` |
+> | Cardiotoxicity | `hERG` | `hERG_blockers` |
+
+```{r check-headers}
+if (USE_EXAMPLE_DATA) {
+  tox_raw <- read_csv(file.path(EXAMPLE_DIR, "03_admetlab_results.csv"),
+                       show_col_types = FALSE)
+} else {
+  tox_raw <- read_csv("03_toxicity_filtering/admetlab_results.csv",
+                       show_col_types = FALSE)
+}
+
+cat("ADMETlab columns detected:\n")
+print(colnames(tox_raw))
+```
+
+---
+
+# Step 4 — Rename columns to standard names
+
+Adjust the `rename()` calls to match your version's actual headers.
+
+```{r rename}
+# Standard internal names used downstream
+tox_results <- tox_raw %>%
+  rename(
+    smiles_tox = smiles,   # <- adjust if your column is named differently
+    ames_prob  = Ames,     # <- adjust for v3: Ames_mutagenicity
+    dili_prob  = DILI,
+    herg_prob  = hERG      # <- adjust for v3: hERG_blockers
+  )
+
+cat("Column names after renaming:\n")
+print(colnames(tox_results))
+```
+
+---
+
+# Step 5 — Apply toxicity filter
+
+```{r filter}
+safe_compounds <- tox_results %>%
+  filter(ames_prob < 0.5) %>%
+  filter(dili_prob < 0.5) %>%
+  filter(herg_prob < 0.5)
+
+cat("Compounds passing toxicity filter:", nrow(safe_compounds), "\n")
+cat("Compounds removed (predicted toxic):",
+    nrow(tox_results) - nrow(safe_compounds), "\n")
+```
+
+---
+
+# Step 6 — Merge with compound metadata and export
+
+```{r merge-export}
+compounds_safe <- compounds_filtered %>%
+  inner_join(safe_compounds, by = c("SMILES" = "smiles_tox"))
+
+write_csv(compounds_safe, "03_toxicity_filtering/compounds_safe.csv")
+cat("Output: 03_toxicity_filtering/compounds_safe.csv —",
+    nrow(compounds_safe), "compounds\n")
+```
+
+---
+
+# Filtering Summary
+
+```{r summary}
+cat("=== Filtering Summary ===\n")
+cat("Step 01 (cleaning):        ", n_distinct(compounds_safe$Name), "compounds in\n")
+cat("Step 02 (ADME filter):     ", nrow(compounds_filtered), "compounds\n")
+cat("Step 03 (toxicity filter): ", nrow(compounds_safe), "compounds\n")
+```
+
+---
+
+# Output
+
+| File | Description |
+|------|-------------|
+| `03_toxicity_filtering/for_admetlab.csv` | SMILES list for ADMETlab submission |
+| `03_toxicity_filtering/compounds_safe.csv` | Compounds passing ADME + toxicity screens |
+
+→ Feeds into **Step 04 (Target Prediction)**

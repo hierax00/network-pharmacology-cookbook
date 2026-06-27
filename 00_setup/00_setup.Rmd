@@ -1,0 +1,139 @@
+---
+title: "00 — Setup: Package Installation & Project Scaffold"
+author: "Edgard Uriel López Chablé"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE)
+```
+
+# Overview
+
+This script handles two things:
+
+1. **Package installation** — all R/Bioconductor packages required for the full pipeline.
+2. **Project folder scaffold** — creates the recommended directory structure for a new analysis project.
+
+Run this file **once** before starting a new project. You do not need to re-run it in subsequent sessions.
+
+---
+
+# 1. Package Installation
+
+## CRAN packages
+
+```{r cran}
+install.packages(c(
+  "tidyverse",      # Core data manipulation and plotting
+  "webchem",        # Chemical identifier lookup (PubChem, CIR)
+  "igraph",         # Graph construction and analysis
+  "ggraph",         # Grammar-of-graphics network visualization
+  "ggrepel",        # Non-overlapping text labels
+  "ggVennDiagram",  # Venn diagram visualization
+  "pheatmap",       # Heatmap with hierarchical clustering
+  "UpSetR",         # UpSet intersection plots
+  "RColorBrewer",   # Color palettes
+  "magick",         # Image processing (for pathview PDF compilation)
+  "fs",             # File system operations
+  "readxl",         # Read Excel files
+  "openxlsx"        # Write Excel files
+))
+```
+
+## Bioconductor packages
+
+```{r bioc}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install(c(
+  "clusterProfiler",  # GO, KEGG enrichment analysis
+  "org.Hs.eg.db",     # Human gene annotation database
+  "ReactomePA",       # Reactome pathway enrichment
+  "pathview",         # KEGG pathway map visualization
+  "enrichplot",       # Enrichment visualization (dotplot, cnetplot, etc.)
+  "GOplot",           # GOChord and other GO visualization
+  "STRINGdb",         # Protein-protein interaction data from STRING
+  "reactome.db"       # Reactome database for annotation
+))
+```
+
+## Verify installation
+
+```{r verify}
+required_pkgs <- c(
+  "tidyverse", "webchem", "igraph", "ggraph", "ggrepel", "ggVennDiagram",
+  "pheatmap", "UpSetR", "RColorBrewer", "magick", "fs",
+  "clusterProfiler", "org.Hs.eg.db", "ReactomePA", "pathview",
+  "enrichplot", "GOplot", "STRINGdb"
+)
+
+missing <- required_pkgs[!sapply(required_pkgs, requireNamespace, quietly = TRUE)]
+
+if (length(missing) == 0) {
+  cat("All packages installed successfully!\n")
+} else {
+  cat("Missing packages:\n")
+  print(missing)
+}
+```
+
+---
+
+# 2. Project Folder Scaffold
+
+This creates the recommended directory structure for a new analysis. Adjust `project_root` to your desired path.
+
+```{r scaffold}
+library(fs)
+
+# ── Set your project root ──────────────────────────────────────────────────────
+project_root <- "MyPlant_NetworkPharmacology"   # <- Change this
+
+# ── Folder structure ───────────────────────────────────────────────────────────
+folders <- c(
+  # Step 01: Data cleaning inputs and outputs
+  "01_data_cleaning",
+
+  # Step 02: ADME
+  "02_adme_filtering/input",    # <- place Para_SwissADME.txt here
+  "02_adme_filtering/output",   # <- place swissadme.csv here after download
+
+  # Step 03: Toxicity
+  "03_toxicity_filtering/input",   # <- place SMILES list for ADMETlab here
+  "03_toxicity_filtering/output",  # <- place admetlab_results.csv here
+
+  # Step 04: Target prediction
+  # Name files as: Targets<PubChemCID>.csv  (e.g., Targets2723949.csv)
+  # One file per compound, downloaded from SuperPred or SwissTargetPrediction
+  "04_target_prediction/raw",      # <- place individual Targets*.csv here
+  "04_target_prediction/output",   # <- consolidated df_targets.csv goes here
+
+  # Step 05: Network analysis
+  "05_network_analysis/genecards", # <- place GeneCards*.csv files here
+  "05_network_analysis/output",
+
+  # Step 06: Pre-docking analysis
+  "06_predocking_analysis/output"
+)
+
+dir_create(path(project_root, folders), recurse = TRUE)
+
+cat("Project scaffold created at:", project_root, "\n")
+dir_tree(project_root)
+```
+
+---
+
+# Notes
+
+- Keep **raw data files unchanged** in their input folders. Never overwrite them.
+- All generated outputs are written to `output/` subfolders.
+- The `reference/` folder in this cookbook contains notes on expected file headers from each database.
+- The PubChem CID for any compound can be found at: https://pubchem.ncbi.nlm.nih.gov/

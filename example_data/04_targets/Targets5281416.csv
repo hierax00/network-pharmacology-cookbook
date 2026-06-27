@@ -1,0 +1,7 @@
+Target Name,Gene Symbol,UniProt ID,Probability,Model accuracy
+Nitric oxide synthase endothelial,NOS3,P29474,0.82,0.81
+RAC-alpha serine/threonine-protein kinase,AKT1,P31749,0.71,0.79
+Prostaglandin G/H synthase 2,PTGS2,P35354,0.65,0.83
+Mitogen-activated protein kinase 1,MAPK1,P28482,0.58,0.78
+Epidermal growth factor receptor,EGFR,P00533,0.48,0.76
+PI3-kinase subunit alpha,PIK3CA,P42336,0.35,0.75

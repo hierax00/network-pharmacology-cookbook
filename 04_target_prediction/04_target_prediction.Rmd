@@ -1,0 +1,197 @@
+---
+title: "04 — Target Prediction: File Convention & Consolidation"
+author: "Edgard Uriel López Chablé"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+# Overview
+
+Consolidates individual target prediction files (one per compound) into a single master data frame, then attaches compound metadata.
+
+## Supported prediction servers
+
+| Server | URL | Notes |
+|--------|-----|-------|
+| **SwissTargetPrediction** | https://www.swisstargetprediction.ch/ | Organism selector: *Homo sapiens* |
+| **SuperPred** | https://prediction.charite.de/ | SMILES or name input |
+
+See `reference/database_headers.md` for exact column differences between servers and versions.
+
+## File naming convention: `Targets<PubChemCID>.csv`
+
+> **Why PubChem CID, not CAS?**
+> A single compound can have multiple CAS numbers registered across different chemical databases (racemate vs. enantiomer, anhydrous vs. hydrate, etc.). This creates silent mismatches when joining tables. The PubChem CID is a single, stable, unambiguous integer identifier.
+>
+> Example: Apigenin → `Targets5280443.csv`
+>
+> To find a PubChem CID: https://pubchem.ncbi.nlm.nih.gov/ → search by name → copy the CID integer.
+
+```{r example-flag}
+USE_EXAMPLE_DATA <- TRUE
+EXAMPLE_DIR      <- "example_data"
+```
+
+```{r libraries}
+library(tidyverse)
+library(fs)
+```
+
+---
+
+# Step 1 — Locate prediction files
+
+```{r locate}
+if (USE_EXAMPLE_DATA) {
+  target_dir <- file.path(EXAMPLE_DIR, "04_targets")
+} else {
+  target_dir <- "04_target_prediction/raw"
+  # Place your Targets<CID>.csv files in this folder
+}
+
+target_files <- dir_ls(target_dir, glob = "*.csv")
+cat("Found", length(target_files), "prediction files\n")
+```
+
+---
+
+# Step 2 — Header check
+
+> ⚠️ **Always inspect headers before consolidating.** Column names differ by server
+> and by version. Run this block on your first file to see what you have.
+
+```{r check-headers}
+if (length(target_files) > 0) {
+  sample_df <- read_csv(target_files[1], show_col_types = FALSE, n_max = 3)
+  cat("Headers in", basename(target_files[1]), ":\n")
+  print(colnames(sample_df))
+  print(head(sample_df, 3))
+}
+```
+
+---
+
+# Step 3 — Consolidate files
+
+Choose the block that matches your server output format.
+
+## Option A — SwissTargetPrediction format
+
+> Expected headers: `Target Name`, `Gene Symbol`, `UniProt ID`, `Probability`, `Model accuracy`
+>
+> Probabilities are already in decimal (0–1) format.
+
+```{r consolidate-stp}
+safe_read_stp <- function(file) {
+  df <- read_csv(file, show_col_types = FALSE)
+  required <- c("Target Name", "Gene Symbol", "UniProt ID", "Probability")
+  if (nrow(df) > 0 && all(required %in% colnames(df))) return(df)
+  message("Skipping (unexpected format): ", basename(file))
+  return(NULL)
+}
+
+targets_raw <- target_files %>%
+  set_names(basename(.)) %>%
+  map_dfr(safe_read_stp, .id = "file_name")
+
+df_targets <- targets_raw %>%
+  mutate(
+    PubChemCID = as.integer(str_remove_all(file_name, "^Targets|\\.csv$"))
+  ) %>%
+  rename(UniProtID = `UniProt ID`) %>%
+  filter(Probability > 0) %>%
+  select(PubChemCID, `Target Name`, `Gene Symbol`, UniProtID,
+         Probability, `Model accuracy`, -file_name)
+
+cat("Total interactions stacked:", nrow(df_targets), "\n")
+cat("Unique compounds:", n_distinct(df_targets$PubChemCID), "\n")
+cat("Unique targets:", n_distinct(df_targets$UniProtID), "\n")
+```
+
+## Option B — SuperPred format
+
+> Expected headers: `Target_name`, `uniprot_id`, `probability`, `model_acc`
+>
+> Probabilities may be 0–100 (percentage) — check and convert if needed.
+
+```{r consolidate-superpred, eval=FALSE}
+safe_read_superpred <- function(file) {
+  df <- read_csv(file, show_col_types = FALSE)
+  required <- c("Target_name", "uniprot_id", "probability")
+  if (nrow(df) > 0 && all(required %in% colnames(df))) return(df)
+  message("Skipping: ", basename(file))
+  return(NULL)
+}
+
+targets_raw_sp <- target_files %>%
+  set_names(basename(.)) %>%
+  map_dfr(safe_read_superpred, .id = "file_name")
+
+df_targets <- targets_raw_sp %>%
+  mutate(
+    PubChemCID  = as.integer(str_remove_all(file_name, "^Targets|\\.csv$")),
+    Probability = if_else(probability > 1, probability / 100, probability)  # % → decimal
+  ) %>%
+  rename(
+    `Target Name` = Target_name,
+    `Gene Symbol` = gene_symbol,   # adjust if column name differs
+    UniProtID     = uniprot_id,
+    `Model accuracy` = model_acc
+  ) %>%
+  filter(Probability > 0) %>%
+  select(PubChemCID, `Target Name`, `Gene Symbol`, UniProtID,
+         Probability, `Model accuracy`)
+```
+
+---
+
+# Step 4 — Attach compound metadata
+
+```{r attach-metadata}
+compounds_safe <- read_csv("03_toxicity_filtering/compounds_safe.csv",
+                            show_col_types = FALSE)
+
+df_targets_annotated <- df_targets %>%
+  left_join(
+    compounds_safe %>% select(Name, PubChemCID, SMILES),
+    by = "PubChemCID"
+  )
+
+cat("Annotated interactions:", nrow(df_targets_annotated), "\n")
+```
+
+---
+
+# Step 5 — Export
+
+```{r export}
+write_csv(df_targets_annotated, "04_target_prediction/df_targets.csv")
+cat("Output: 04_target_prediction/df_targets.csv\n\n")
+
+# Quick preview
+df_targets_annotated %>%
+  group_by(Name) %>%
+  summarise(n_targets = n(), max_prob = max(Probability)) %>%
+  arrange(desc(n_targets)) %>%
+  print()
+```
+
+---
+
+# Output
+
+| File | Description |
+|------|-------------|
+| `04_target_prediction/raw/Targets<CID>.csv` | Individual prediction files (one per compound) |
+| `04_target_prediction/df_targets.csv` | Consolidated compound–target interaction table |
+
+→ Feeds into **Step 05 (Network Analysis)**

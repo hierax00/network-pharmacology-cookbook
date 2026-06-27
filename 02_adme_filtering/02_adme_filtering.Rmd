@@ -1,0 +1,161 @@
+---
+title: "02 — ADME Filtering: Lipinski Rule-of-Five via SwissADME"
+author: "Edgard Uriel López Chablé"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+# Overview
+
+Filters compounds by oral drug-likeness using **SwissADME** (https://www.swissadme.ch/).
+
+The **Lipinski Rule-of-Five** predicts oral bioavailability:
+
+| Property | Threshold |
+|----------|-----------|
+| Molecular weight | ≤ 500 Da |
+| LogP (lipophilicity) | ≤ 5 |
+| H-bond donors | ≤ 5 |
+| H-bond acceptors | ≤ 10 |
+
+We allow ≤ 1 violation (permissive, appropriate for natural product extracts). Additionally, we require GI absorption to be present.
+
+```{r example-flag}
+USE_EXAMPLE_DATA <- TRUE
+EXAMPLE_DIR      <- "example_data"
+```
+
+```{r libraries}
+library(tidyverse)
+```
+
+---
+
+# Step 1 — Load compounds from Step 01
+
+```{r load}
+compounds_ready <- read_csv("01_data_cleaning/compounds_ready.csv",
+                             show_col_types = FALSE)
+cat("Input compounds:", nrow(compounds_ready), "\n")
+```
+
+---
+
+# Step 2 — Generate SwissADME input file
+
+SwissADME accepts a plain-text file: one entry per line, `SMILES IDENTIFIER` (space-separated, no header). We use the **PubChem CID** as identifier — it is a unique, stable integer that makes the merge back unambiguous.
+
+```{r swissadme-input}
+for_swissadme <- compounds_ready %>%
+  select(SMILES, PubChemCID)
+
+write.table(for_swissadme,
+            file      = "02_adme_filtering/for_swissadme.txt",
+            sep       = " ",
+            row.names = FALSE,
+            col.names = FALSE,
+            quote     = FALSE)
+
+cat("SwissADME input written:", nrow(for_swissadme), "compounds\n")
+cat("File: 02_adme_filtering/for_swissadme.txt\n")
+```
+
+---
+
+# Manual Step — Run SwissADME
+
+> **Action required (skip when using example data):**
+>
+> 1. Go to https://www.swissadme.ch/
+> 2. Upload or paste the contents of `for_swissadme.txt`
+> 3. Run the analysis
+> 4. Download the CSV results
+> 5. Save as `02_adme_filtering/swissadme_results.csv`
+
+---
+
+# Step 3 — Load SwissADME results
+
+## ⚠️ Header check — always run this first
+
+SwissADME occasionally renames columns between versions. The essential columns for this pipeline are:
+
+| Column name | Meaning |
+|-------------|---------|
+| `Molecule` | Identifier submitted (= PubChemCID) |
+| `Lipinski..violations` | Integer 0–4 |
+| `GI.absorption` | `"High"` or `"Low"` |
+
+Run `colnames(read.csv("swissadme_results.csv"))` to verify before proceeding.
+
+```{r load-swissadme}
+if (USE_EXAMPLE_DATA) {
+  swissadme_raw <- read_csv(file.path(EXAMPLE_DIR, "02_swissadme.csv"),
+                             show_col_types = FALSE)
+} else {
+  swissadme_raw <- read_csv("02_adme_filtering/swissadme_results.csv",
+                             show_col_types = FALSE)
+}
+
+# Quick header check
+cat("SwissADME columns detected:\n")
+print(colnames(swissadme_raw))
+```
+
+```{r merge}
+adme_results <- swissadme_raw %>%
+  rename(PubChemCID = Molecule) %>%
+  mutate(PubChemCID = as.integer(PubChemCID))
+
+compounds_with_adme <- compounds_ready %>%
+  left_join(adme_results, by = "PubChemCID")
+
+cat("Compounds after merge:", nrow(compounds_with_adme), "\n")
+```
+
+---
+
+# Step 4 — Apply Lipinski filter
+
+```{r filter}
+# Adjust thresholds to your project:
+#   Natural products (permissive): Lipinski..violations <= 1, GI.absorption %in% c("Yes","High")
+#   Strict drug-likeness:          Lipinski..violations == 0, GI.absorption == "High"
+
+compounds_filtered <- compounds_with_adme %>%
+  filter(Lipinski..violations <= 1) %>%
+  filter(GI.absorption %in% c("High", "Yes"))
+
+cat("Compounds passing ADME filter:", nrow(compounds_filtered), "\n")
+cat("Compounds removed:            ", nrow(compounds_with_adme) - nrow(compounds_filtered), "\n")
+```
+
+---
+
+# Step 5 — Export
+
+```{r export}
+write_csv(compounds_filtered, "02_adme_filtering/compounds_filtered.csv")
+cat("Output: 02_adme_filtering/compounds_filtered.csv\n")
+print(compounds_filtered %>% select(Name, PubChemCID, Lipinski..violations, GI.absorption))
+```
+
+---
+
+# Output
+
+| File | Description |
+|------|-------------|
+| `02_adme_filtering/for_swissadme.txt` | Input file for SwissADME |
+| `02_adme_filtering/compounds_filtered.csv` | Compounds passing Lipinski filter |
+
+→ Feeds into **Step 03 (Toxicity Filtering)**

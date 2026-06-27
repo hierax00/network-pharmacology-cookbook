@@ -1,0 +1,5 @@
+Target Name,Gene Symbol,UniProt ID,Probability,Model accuracy
+Prostaglandin G/H synthase 2,PTGS2,P35354,0.81,0.83
+Nitric oxide synthase endothelial,NOS3,P29474,0.68,0.81
+RAC-alpha serine/threonine-protein kinase,AKT1,P31749,0.55,0.79
+Mitogen-activated protein kinase 1,MAPK1,P28482,0.42,0.78

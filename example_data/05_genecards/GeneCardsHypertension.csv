@@ -1,0 +1,12 @@
+Gene Symbol,Uniprot ID,Relevance score,Gene Description
+NOS3,P29474,52.3,Nitric oxide synthase endothelial
+ACE,P12821,48.1,Angiotensin-converting enzyme
+AGT,P01019,42.5,Angiotensinogen
+AGTR1,P30556,38.7,Angiotensin II receptor type 1
+PTGS2,P35354,25.4,Prostaglandin G/H synthase 2
+AKT1,P31749,22.1,RAC-alpha serine/threonine-protein kinase
+MAPK1,P28482,18.6,Mitogen-activated protein kinase 1
+PIK3CA,P42336,15.2,PI3-kinase subunit alpha
+ESR1,P03372,12.8,Estrogen receptor alpha
+VEGFA,P15692,10.4,Vascular endothelial growth factor A
+EGFR,P00533,8.7,Epidermal growth factor receptor

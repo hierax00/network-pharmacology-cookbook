@@ -1,0 +1,406 @@
+---
+title: "06 — Pre-Docking Analysis: Heatmaps, UpSet Plots & Candidate Prioritization"
+author: "Edgard Uriel López Chablé"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+```
+
+# Overview
+
+Molecular docking is computationally expensive. This step identifies the highest-priority compound–target pairs **before** spending GPU time.
+
+Three questions answered:
+
+1. **Which targets are hit by the most compounds?** → Hub target bar chart
+2. **Which compounds share the most targets?** → UpSet plot (reveals synergistic clusters)
+3. **What is the predicted binding probability per compound–target pair?** → Heatmap (core prioritization tool)
+
+Compounds with high binding probability AND targeting multiple disease-relevant proteins (high degree) are the strongest docking candidates.
+
+```{r example-flag}
+USE_EXAMPLE_DATA <- TRUE
+```
+
+```{r libraries}
+library(tidyverse)
+library(pheatmap)
+library(UpSetR)
+library(RColorBrewer)
+library(igraph)
+library(grid)
+```
+
+---
+
+# Load data
+
+```{r load}
+network_final <- read_csv("05_network_analysis/output/network_final.csv",
+                           show_col_types = FALSE)
+
+cat("Interactions:", nrow(network_final), "\n")
+cat("Compounds:   ", n_distinct(network_final$Name), "\n")
+cat("Targets:     ", n_distinct(network_final$`Gene Symbol`), "\n")
+```
+
+---
+
+# Step 1 — Hub Target Bar Chart
+
+Ranks targets by number of compound connections. High-degree targets are the primary docking candidates: multiple compounds from your extract are predicted to engage them, suggesting a convergent pharmacological mechanism.
+
+```{r hub-bar}
+dir.create("06_predocking_analysis/output", recursive = TRUE, showWarnings = FALSE)
+
+# Build bipartite graph to compute degree per node
+edges_bipartite <- network_final %>%
+  dplyr::select(Name, `Gene Symbol`) %>%
+  distinct()
+
+graph_bipartite  <- graph_from_data_frame(edges_bipartite, directed = FALSE)
+all_degrees      <- degree(graph_bipartite)
+compound_names   <- unique(network_final$Name)
+target_degrees   <- all_degrees[!names(all_degrees) %in% compound_names]
+
+n_top <- 10  # Number of hub targets to display
+
+hub_targets <- tibble(
+  Target = names(target_degrees),
+  Degree = as.integer(target_degrees)
+) %>%
+  arrange(desc(Degree)) %>%
+  slice_head(n = n_top)
+
+# Plot
+plot_hub_bar <- ggplot(hub_targets, aes(x = reorder(Target, Degree), y = Degree)) +
+  geom_bar(stat = "identity", fill = "#3498db", width = 0.7) +
+  coord_flip() +
+  labs(
+    title    = paste("Top", n_top, "Hub Targets"),
+    subtitle = "Number of compounds predicted to interact with each target",
+    x        = "Target (Gene Symbol)",
+    y        = "Compound Interactions (Degree)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+
+print(plot_hub_bar)
+
+ggsave("06_predocking_analysis/output/Hub_Targets_BarChart.tiff",
+       plot = plot_hub_bar, width = 10, height = 7, units = "in",
+       dpi = 600, compression = "lzw", bg = "white")
+ggsave("06_predocking_analysis/output/Hub_Targets_BarChart.pdf",
+       plot = plot_hub_bar, width = 10, height = 7, units = "in",
+       bg = "white", device = cairo_pdf)
+
+write_csv(hub_targets, "06_predocking_analysis/output/Hub_Targets_Ranked.csv")
+cat("Hub target bar chart saved.\n")
+```
+
+---
+
+# Step 2 — UpSet Plot: Shared Targets Between Compounds
+
+Shows target overlaps across compounds. Large intersections indicate cooperative action — these shared targets are high-value docking candidates.
+
+```{r upset}
+upset_list <- network_final %>%
+  filter(Probability > 0) %>%
+  group_by(Name) %>%
+  summarise(Targets = list(`Gene Symbol`)) %>%
+  deframe()
+
+pdf("06_predocking_analysis/output/UpSet_Compound_Target_Overlap.pdf",
+    width = 16, height = 10)
+
+upset(
+  fromList(upset_list),
+  nsets       = min(10, length(upset_list)),
+  nintersects = 20,
+  order.by    = "freq",
+  main.bar.color = "#2c3e50",
+  sets.bar.color = "#e74c3c",
+  text.scale     = c(1.3, 1.3, 1, 1, 1.2, 1.2)
+)
+
+grid.text("Target Intersection by Compound",
+          x = 0.65, y = 0.95,
+          gp = gpar(fontsize = 20, fontface = "bold"))
+
+dev.off()
+cat("UpSet plot saved.\n")
+```
+
+---
+
+# Step 3 — Heatmap: Compound × Target Binding Probability
+
+Rows = compounds, columns = hub targets, color = predicted binding probability.
+
+**How to read it:**
+- Dark red = high predicted affinity → prioritize for docking
+- White = no predicted interaction
+- Hierarchical clustering groups compounds with similar target profiles
+
+```{r heatmap}
+# Use hub targets as columns
+top_target_names <- hub_targets$Target
+
+# Build probability matrix
+heatmap_long <- network_final %>%
+  filter(`Gene Symbol` %in% top_target_names) %>%
+  dplyr::select(Name, `Gene Symbol`, Probability) %>%
+  distinct(Name, `Gene Symbol`, .keep_all = TRUE)
+
+heatmap_wide <- heatmap_long %>%
+  pivot_wider(names_from = `Gene Symbol`, values_from = Probability,
+              values_fill = 0)
+
+# Convert to named matrix
+heatmap_matrix           <- as.data.frame(heatmap_wide)
+rownames(heatmap_matrix) <- heatmap_matrix$Name
+heatmap_matrix$Name      <- NULL
+
+# Reorder columns to match hub ranking
+col_order       <- intersect(top_target_names, colnames(heatmap_matrix))
+heatmap_matrix  <- heatmap_matrix[, col_order, drop = FALSE]
+
+pdf("06_predocking_analysis/output/Heatmap_Compound_Target_Probability.pdf",
+    width  = max(8, ncol(heatmap_matrix) * 0.9 + 2),
+    height = max(6, nrow(heatmap_matrix) * 0.5 + 2))
+
+pheatmap(
+  heatmap_matrix,
+  color           = colorRampPalette(c("white", "#f39c12", "#c0392b"))(50),
+  display_numbers = TRUE,
+  number_format   = "%.2f",
+  fontsize_number = 9,
+  cluster_rows    = TRUE,
+  cluster_cols    = TRUE,
+  main            = "Compound–Target Binding Probability",
+  angle_col       = 45,
+  fontsize_row    = 10,
+  fontsize_col    = 10
+)
+
+dev.off()
+cat("Heatmap saved.\n")
+```
+
+---
+
+# Step 4 — Candidate Prioritization Table
+
+Combines hub degree, binding probability, and compound hit count into a ranked table. This is the direct input for selecting compound–target pairs to submit to molecular docking.
+
+```{r prioritize}
+docking_candidates <- network_final %>%
+  filter(`Gene Symbol` %in% top_target_names, Probability > 0) %>%
+  group_by(`Gene Symbol`, UniProtID) %>%
+  summarise(
+    n_compounds     = n(),
+    max_probability = max(Probability),
+    mean_probability = round(mean(Probability), 3),
+    top_compounds   = paste(Name[order(-Probability)][1:min(3, n())], collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  left_join(
+    hub_targets %>% dplyr::select(`Gene Symbol` = Target, Degree),
+    by = "Gene Symbol"
+  ) %>%
+  arrange(desc(Degree), desc(max_probability)) %>%
+  dplyr::rename(
+    Gene       = `Gene Symbol`,
+    Hub_Degree = Degree,
+    UniProt_ID = UniProtID
+  )
+
+write_csv(docking_candidates, "06_predocking_analysis/output/Docking_Candidates_Ranked.csv")
+
+cat("=== Top Docking Candidates ===\n")
+print(docking_candidates %>%
+        dplyr::select(Gene, Hub_Degree, n_compounds, max_probability, top_compounds))
+```
+
+---
+
+# Step 5 — Drug-Gene Interaction Cross-Validation (DGIdb)
+
+> **Why cross-validate with known drugs?**
+> If an approved drug already targets one of your hub genes for the same disease you
+> are studying, that is strong pharmacological evidence that the target is relevant.
+> It does *not* mean your compounds are redundant — a plant phenolic acting on the
+> same target may have a better safety profile, fewer off-target effects, or a
+> complementary binding pose. Reviewers see this as evidence that your target
+> selection is biologically justified, not arbitrary.
+>
+> We use **DGIdb** (Drug Gene Interaction Database, https://dgidb.org) because it
+> aggregates DrugBank, ChEMBL, TTD, and other sources and has a free REST API that
+> does not require registration. This step runs automatically.
+
+```{r dgidb}
+# ── DGIdb v4+ uses GraphQL — the old REST v2 endpoint is deprecated ───────────
+# GraphQL lets us request exactly the fields we need in a single query.
+
+gql_query <- sprintf('
+{
+  genes(names: [%s]) {
+    nodes {
+      name
+      interactions {
+        drug { name approved }
+        interactionScore
+        interactionTypes { type directionality }
+        sources { sourceDbName }
+      }
+    }
+  }
+}',
+paste0('"', top_target_names, '"', collapse = ", ")
+)
+
+dgidb_response <- POST(
+  "https://dgidb.org/api/graphql",
+  body    = toJSON(list(query = gql_query), auto_unbox = TRUE),
+  add_headers(`Content-Type` = "application/json"),
+  encode  = "raw"
+)
+
+if (http_error(dgidb_response)) {
+  warning("DGIdb GraphQL unavailable. Check https://dgidb.org manually.")
+  drug_validation <- tibble(Gene = character(), Drug = character(),
+                             Approved = logical(), Interaction_Type = character(),
+                             Source = character())
+} else {
+  parsed <- fromJSON(content(dgidb_response, "text", encoding = "UTF-8"),
+                     simplifyVector = FALSE)
+
+  nodes <- parsed$data$genes$nodes
+
+  drug_validation <- map_dfr(nodes, function(gene_node) {
+    ixns <- gene_node$interactions
+    if (length(ixns) == 0) return(NULL)
+    map_dfr(ixns, function(ix) {
+      tibble(
+        Gene             = gene_node$name,
+        Drug             = ix$drug$name %||% NA_character_,
+        Approved         = ix$drug$approved %||% NA,
+        Interaction_Type = if (length(ix$interactionTypes) > 0)
+                             ix$interactionTypes[[1]]$type else NA_character_,
+        Source           = if (length(ix$sources) > 0)
+                             paste(map_chr(ix$sources, "sourceDbName"),
+                                   collapse = "; ") else NA_character_
+      )
+    })
+  }) %>%
+    filter(!is.na(Drug)) %>%
+    distinct()
+
+  cat("Drug–gene interactions found:", nrow(drug_validation), "\n")
+  cat("Hub genes with known drugs:", n_distinct(drug_validation$Gene),
+      "/", length(top_target_names), "\n")
+
+  novel_targets <- setdiff(top_target_names, unique(drug_validation$Gene))
+  if (length(novel_targets) > 0) {
+    cat("\nHub genes with no known drug interactions (potentially novel):\n")
+    cat(paste(novel_targets, collapse = ", "), "\n")
+  }
+
+  write_csv(drug_validation,
+            "06_predocking_analysis/output/DrugGene_Validation.csv")
+
+  drug_summary <- drug_validation %>%
+    group_by(Gene) %>%
+    summarise(
+      n_drugs  = n_distinct(Drug),
+      approved = sum(Approved == TRUE, na.rm = TRUE),
+      drugs    = paste(unique(Drug)[seq_len(min(3, n_distinct(Drug)))],
+                       collapse = "; "),
+      .groups  = "drop"
+    ) %>%
+    arrange(desc(n_drugs))
+
+  print(drug_summary)
+}
+```
+
+---
+
+# Step 6 — GOChord Diagram (Optional)
+
+Chord diagram connecting KEGG pathways to genes. Useful for visualizing which hub genes participate in multiple pathways simultaneously.
+
+```{r gochord, eval=FALSE}
+library(GOplot)
+library(clusterProfiler)
+
+# Load enrichment object from Step 05
+# ekegg <- readRDS("05_network_analysis/output/ekegg.rds")  # if you saved it
+
+ekegg_readable <- setReadable(ekegg, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+df_kegg        <- as.data.frame(ekegg_readable)
+top5           <- df_kegg[1:5, ]
+all_genes      <- unique(unlist(strsplit(top5$geneID, "/")))
+
+chord_matrix           <- matrix(0, nrow = length(all_genes), ncol = nrow(top5))
+rownames(chord_matrix) <- all_genes
+colnames(chord_matrix) <- top5$Description
+
+for (i in seq_len(nrow(top5))) {
+  genes_in_path <- unlist(strsplit(top5$geneID[i], "/"))
+  chord_matrix[genes_in_path, i] <- 1
+}
+
+chord_matrix <- cbind(chord_matrix,
+                      logFC = seq(-1, 1, length.out = nrow(chord_matrix)))
+
+pdf("06_predocking_analysis/output/GOChord_KEGG_Top5.pdf", width = 14, height = 14)
+GOChord(chord_matrix,
+        space         = 0.03,
+        gene.order    = "logFC",
+        gene.space    = 0.28,
+        gene.size     = 4,
+        process.label = 10,
+        ribbon.col    = brewer.pal(5, "Set2"),
+        lfc.col       = c("#E74C3C", "white", "#3498DB"),
+        border.size   = 0.1)
+dev.off()
+cat("GOChord saved.\n")
+```
+
+---
+
+# Output Summary
+
+| File | Description |
+|------|-------------|
+| `Hub_Targets_BarChart.*` | Bar chart of top hub targets by compound degree |
+| `Hub_Targets_Ranked.csv` | Ranked hub target table |
+| `UpSet_Compound_Target_Overlap.pdf` | Shared target intersections between compounds |
+| `Heatmap_Compound_Target_Probability.pdf` | Binding probability matrix (core prioritization) |
+| `Docking_Candidates_Ranked.csv` | **Final ranked list for molecular docking** |
+| `DrugGene_Validation.csv` | Known drugs per hub gene (DGIdb/DrugBank) |
+| `GOChord_KEGG_Top5.pdf` | Gene–pathway chord diagram (optional) |
+
+---
+
+# Next Steps: Molecular Docking & MD
+
+> **[ In development ]**
+>
+> Use `Docking_Candidates_Ranked.csv` as input for:
+>
+> 1. **Structure preparation** — Download protein structures from PDB (https://www.rcsb.org/), prepare with AutoDockTools or GNINA
+> 2. **Ligand preparation** — Generate 3D conformers from SMILES (RDKit, OpenBabel)
+> 3. **Molecular docking** — AutoDock Vina or GNINA
+> 4. **Binding pose analysis** — PyMOL, PLIP
+> 5. **Molecular dynamics (MD)** — GROMACS or AMBER for hit validation
