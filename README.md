@@ -2,6 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Language: R](https://img.shields.io/badge/Language-R-276DC3.svg)](https://www.r-project.org/)
+[![DOI](https://zenodo.org/badge/1282464483.svg)](https://doi.org/10.5281/zenodo.20975264)
 
 **Author:** Edgard Uriel López Chablé  
 **Group:** Laboratorio de Investigación Química y Farmacológica de Productos Naturales, Posgrado en Ciencias Químico Biológicas, UAQ
@@ -128,7 +129,7 @@ See `00_setup/00_setup.Rmd` for the full installation block.
 
 If you use this pipeline in your research, please cite:
 
-> López-Chablé, E.U. (2026). *Network Pharmacology Cookbook* (v1.0.0). Zenodo. https://doi.org/10.5281/zenodo.XXXXXXX
+> López-Chablé, E.U. (2026). *Network Pharmacology Cookbook* (v1.0.0). Zenodo. https://doi.org/10.5281/zenodo.20975265
 
 ---
 
@@ -141,7 +142,7 @@ Portions of this code were developed with AI assistance (Claude, Anthropic) and 
 ## Author
 
 **Edgard Uriel López Chablé**  
-QFB Student, 5th semester · Universidad Autónoma de Querétaro (UAQ)  
+QFB Student, 6th semester · Universidad Autónoma de Querétaro (UAQ)  
 Junior Researcher — Laboratorio de Investigación Química y Farmacológica de Productos Naturales  
 
 ---
