@@ -14,39 +14,7 @@ A reproducible, step-by-step R pipeline for **network pharmacology analysis of p
 
 ## Pipeline Overview
 
-```mermaid
-flowchart TD
-    A["🧪 Raw compound data\nGC-MS matrix · Curated list"] --> B
-
-    B["00 · Setup\nR packages · project scaffold"]
-    B --> C
-
-    C["01 · Data Cleaning\nPubChem SMILES · binarization · Scenario A/B"]
-    C --> D
-
-    D["02 · ADME Filtering\nSwissADME · Lipinski rule-of-five"]
-    D --> E
-
-    E["03 · Toxicity Screen\nADMETlab 2/3 · Ames · DILI · hERG"]
-    E --> F
-
-    F["04 · Target Prediction\nSwissTargetPrediction · SuperPred\nTargets{PubChemCID}.csv"]
-    F --> G
-
-    G["05 · Network Analysis\nGeneCards intersection · Venn · Networks B/C/D/E\nTopology metrics · Degree + Betweenness + Closeness\nGO · KEGG · Reactome · Pathview maps · cnetplot"]
-    G --> H
-
-    H["06 · Pre-Docking Analysis\nHeatmap · UpSet · DGIdb drug–gene validation\n📄 Docking_Candidates_Ranked.csv"]
-    H -.-> I
-
-    I["🔬 Molecular Docking\nAutoDock Vina · GNINA\n[ in development ]"]
-    I -.-> J
-
-    J["💻 Molecular Dynamics\nGROMACS · AMBER\n[ in development ]"]
-
-    style I fill:#f1f5f9,stroke:#94a3b8,stroke-dasharray:5 5,color:#64748b
-    style J fill:#f1f5f9,stroke:#94a3b8,stroke-dasharray:5 5,color:#64748b
-```
+![Pipeline Overview](pipeline_overview.svg)
 
 ---
 
